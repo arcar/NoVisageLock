@@ -1,0 +1,9 @@
+{
+    "camera": 0,
+    "absence_timeout": 5,
+    "frame_skip": 5,
+    "owner_threshold": 0.50,
+    "show_preview": true,
+    "lock_enabled": true,
+    "owner_configured":false
+}
