@@ -1,4 +1,3 @@
-import cv2
 import os
 import sys
 import time
@@ -8,18 +7,25 @@ import threading
 import subprocess
 import platform
 import warnings
+import ctypes
 
+
+import cv2
 import numpy as np
 import insightface
 
-from filelock import FileLock, Timeout
+
 from tray import TrayIcon
+from camera import CameraManager
+from windows_events import WindowsEvents
+
 
 
 warnings.filterwarnings(
     "ignore",
     category=FutureWarning
 )
+
 
 
 # =====================================================
@@ -44,12 +50,6 @@ OWNER_FILE = os.path.join(
 )
 
 
-LOCK_FILE = os.path.join(
-    BASE_DIR,
-    "NoVisageLock.lock"
-)
-
-
 LOG_FILE = os.path.join(
     BASE_DIR,
     "novisagelock.log"
@@ -62,9 +62,15 @@ LOG_FILE = os.path.join(
 # =====================================================
 
 logging.basicConfig(
+
     filename=LOG_FILE,
+
     level=logging.INFO,
-    format="%(asctime)s - %(message)s"
+
+    format="%(asctime)s - %(levelname)s - %(message)s",
+
+    force=True
+
 )
 
 
@@ -84,6 +90,52 @@ with open(
 
 
 # =====================================================
+# MUTEX WINDOWS
+# =====================================================
+
+mutex_handle = None
+
+
+def already_running():
+
+
+    global mutex_handle
+
+
+    if platform.system() != "Windows":
+
+        return False
+
+
+
+    mutex_handle = ctypes.windll.kernel32.CreateMutexW(
+
+        None,
+
+        False,
+
+        "NoVisageLock_Instance"
+
+    )
+
+
+    error = ctypes.windll.kernel32.GetLastError()
+
+
+
+    if error == 183:
+
+        return True
+
+
+
+    return False
+
+
+
+
+
+# =====================================================
 # ENROLL
 # =====================================================
 
@@ -96,14 +148,19 @@ def launch_enroll():
 
 
     subprocess.run(
+
         [
             sys.executable,
+
             os.path.join(
                 BASE_DIR,
                 "enroll_camera.py"
             )
         ]
+
     )
+
+
 
 
 
@@ -128,11 +185,14 @@ def check_owner():
 
 
 
+
+
 # =====================================================
-# IA
+# IA RECONNAISSANCE
 # =====================================================
 
 class FaceIdentifier:
+
 
 
     def __init__(self):
@@ -150,17 +210,25 @@ class FaceIdentifier:
 
 
         self.model = insightface.app.FaceAnalysis(
+
             name="buffalo_l",
+
             providers=[
                 "CPUExecutionProvider"
             ]
+
         )
+
 
 
         self.model.prepare(
+
             ctx_id=0,
+
             det_size=(640,640)
+
         )
+
 
 
         logging.info(
@@ -169,7 +237,12 @@ class FaceIdentifier:
 
 
 
-    def recognize(self, frame):
+
+
+    def recognize(
+        self,
+        frame
+    ):
 
 
         results = []
@@ -180,7 +253,9 @@ class FaceIdentifier:
         )
 
 
+
         for face in faces:
+
 
 
             emb = face.embedding
@@ -191,29 +266,45 @@ class FaceIdentifier:
             )
 
 
+
             score = float(
+
                 np.dot(
+
                     self.owner,
+
                     emb
+
                 )
+
             )
 
 
+
             results.append(
+
                 {
+
                     "owner":
                     score >= CONFIG["owner_threshold"],
+
 
                     "score":
                     score,
 
+
                     "face":
                     face
+
                 }
+
             )
 
 
+
         return results
+
+
 
 
 
@@ -224,26 +315,38 @@ class FaceIdentifier:
 class NoVisageLock:
 
 
+
     def __init__(self):
 
 
         logging.info(
-            "Démarrage"
+            "Démarrage NoVisageLock"
         )
+
 
 
         self.running = True
 
-        self.paused = False
+
+        self.security_state = "NORMAL"
+
+
+        self.verify_start = None
+
+
 
         self.show_preview = False
+
+
+        self.paused = False
 
 
 
         if not check_owner():
 
+
             raise Exception(
-                "Enrôlement impossible"
+                "Profil propriétaire absent"
             )
 
 
@@ -252,15 +355,23 @@ class NoVisageLock:
 
 
 
-        self.cap = cv2.VideoCapture(
+        # -----------------------------
+        # CAMERA
+        # -----------------------------
+
+        self.camera = CameraManager(
+
             CONFIG["camera"]
+
         )
 
 
-        if not self.cap.isOpened():
+
+        if not self.camera.open():
+
 
             raise Exception(
-                "Webcam inaccessible"
+                "Caméra inaccessible"
             )
 
 
@@ -269,30 +380,153 @@ class NoVisageLock:
 
 
 
+        # -----------------------------
+        # EVENTS WINDOWS
+        # -----------------------------
+
+        self.events = WindowsEvents(
+
+            self.windows_event
+
+        )
+
+
+        self.events.start()
+
+
+
+        # -----------------------------
+        # TRAY
+        # -----------------------------
+
         self.tray = TrayIcon(
             self
         )
 
 
-        threading.Thread(
+
+        self.tray_thread = threading.Thread(
+
             target=self.tray.start,
+
             daemon=True
-        ).start()
+
+        )
+
+
+        self.tray_thread.start()
 
 
 
         logging.info(
             "Surveillance active"
         )
+    # =====================================================
+    # EVENEMENTS WINDOWS
+    # =====================================================
+
+    def windows_event(
+        self,
+        event
+    ):
+
+
+        logging.info(
+            f"EVENT WINDOWS : {event}"
+        )
+
+
+        # -------------------------
+        # Mise en veille
+        # -------------------------
+
+        if event == "SUSPEND":
+
+
+            logging.info(
+                "Mise en veille : fermeture caméra"
+            )
+
+
+            self.camera.suspend()
 
 
 
-    # -------------------------------------------------
+        # -------------------------
+        # Réveil
+        # -------------------------
+
+        elif event == "RESUME":
+
+
+            logging.info(
+                "Réveil Windows"
+            )
+
+
+            time.sleep(3)
+
+
+            self.camera.resume()
+
+
+
+        # -------------------------
+        # Verrouillage session
+        # -------------------------
+
+        elif event == "LOCK":
+
+
+            logging.info(
+                "Session verrouillée"
+            )
+
+
+            self.camera.close()
+
+
+
+        # -------------------------
+        # Déverrouillage session
+        # -------------------------
+
+        elif event == "UNLOCK":
+
+
+            logging.info(
+                "Session déverrouillée"
+            )
+
+
+            time.sleep(2)
+
+
+            self.camera.restart()
+
+
+
+            self.security_state = "VERIFY_OWNER"
+
+
+            self.verify_start = time.time()
+
+
+
+            logging.info(
+                "Mode VERIFY_OWNER activé"
+            )
+
+
+
+    # =====================================================
+    # VERROUILLAGE WINDOWS
+    # =====================================================
 
     def lock_windows(self):
 
 
-        logging.info(
+        logging.warning(
             "Verrouillage Windows"
         )
 
@@ -301,36 +535,44 @@ class NoVisageLock:
 
 
             subprocess.run(
+
                 [
                     "rundll32.exe",
+
                     "user32.dll",
+
                     "LockWorkStation"
+
                 ]
+
             )
 
 
 
-    # -------------------------------------------------
+    # =====================================================
+    # CHANGEMENT PROPRIETAIRE
+    # =====================================================
 
     def change_owner(self):
+
+
+        logging.info(
+            "Changement propriétaire"
+        )
 
 
         if os.path.exists(
             OWNER_FILE
         ):
 
+
             os.remove(
                 OWNER_FILE
             )
 
 
+
         launch_enroll()
-
-
-
-        logging.info(
-            "Nouveau propriétaire"
-        )
 
 
 
@@ -338,9 +580,22 @@ class NoVisageLock:
 
 
 
-    # -------------------------------------------------
+        logging.info(
+            "Nouveau propriétaire enregistré"
+        )
+
+
+
+    # =====================================================
+    # BOUCLE PRINCIPALE
+    # =====================================================
 
     def run(self):
+
+
+        logging.info(
+            "Boucle surveillance démarrée"
+        )
 
 
         frame_count = 0
@@ -353,16 +608,24 @@ class NoVisageLock:
 
             if self.paused:
 
+
                 time.sleep(1)
 
                 continue
 
 
 
-            ret, frame = self.cap.read()
+            ret, frame = self.camera.read()
+
 
 
             if not ret:
+
+
+                logging.warning(
+                    "Lecture caméra impossible"
+                )
+
 
                 time.sleep(1)
 
@@ -373,11 +636,13 @@ class NoVisageLock:
             frame_count += 1
 
 
+
             owner_found = False
 
 
 
             if frame_count % CONFIG["frame_skip"] == 0:
+
 
 
                 results = self.identifier.recognize(
@@ -389,69 +654,125 @@ class NoVisageLock:
                 for item in results:
 
 
+
                     if item["owner"]:
+
 
                         owner_found = True
 
 
 
-                    if self.show_preview:
+            # =================================================
+            # MODE VERIFICATION PROPRIETAIRE
+            # =================================================
 
-
-                        face = item["face"]
-
-
-                        x1,y1,x2,y2 = (
-                            face.bbox.astype(int)
-                        )
-
-
-                        cv2.rectangle(
-                            frame,
-                            (x1,y1),
-                            (x2,y2),
-                            (0,255,0)
-                            if item["owner"]
-                            else
-                            (0,0,255),
-                            2
-                        )
-
-
-                        cv2.putText(
-                            frame,
-                            f"{item['score']:.2f}",
-                            (x1,y1-10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (255,255,255),
-                            2
-                        )
+            if self.security_state == "VERIFY_OWNER":
 
 
 
-            if owner_found:
+                logging.info(
+
+                    f"VERIFY_OWNER actif : visage={owner_found}"
+
+                )
 
 
-                self.last_owner_seen = time.time()
+
+                if owner_found:
+
+
+                    logging.info(
+
+                        "Propriétaire confirmé après reconnexion"
+
+                    )
+
+
+                    self.security_state = "NORMAL"
+
+
+                    self.last_owner_seen = time.time()
 
 
 
-            absence = (
-                time.time()
-                -
-                self.last_owner_seen
-            )
+                elif (
+
+                    time.time()
+
+                    -
+
+                    self.verify_start
+
+                ) > CONFIG["verify_timeout"]:
 
 
+
+                    logging.warning(
+
+                        "Propriétaire non confirmé"
+
+                    )
+
+
+                    self.security_state = "NORMAL"
+
+
+                    self.lock_windows()
+
+
+
+            # =================================================
+            # MODE NORMAL
+            # =================================================
+
+            else:
+
+
+
+                if owner_found:
+
+
+                    self.last_owner_seen = time.time()
+
+
+
+                absence = (
+
+                    time.time()
+
+                    -
+
+                    self.last_owner_seen
+
+                )
+
+
+
+                if absence >= CONFIG["absence_timeout"]:
+
+
+
+                    self.lock_windows()
+
+
+
+                    self.last_owner_seen = time.time()
+
+
+
+            # -------------------------------------------------
 
             if self.show_preview:
 
 
                 cv2.imshow(
+
                     "NoVisageLock",
+
                     frame
+
                 )
+
 
                 cv2.waitKey(1)
 
@@ -459,24 +780,8 @@ class NoVisageLock:
 
             else:
 
+
                 cv2.destroyAllWindows()
-
-
-
-            if absence >= CONFIG["absence_timeout"]:
-
-
-                self.lock_windows()
-
-
-                # important :
-                # le programme continue après verrouillage
-
-                self.last_owner_seen = time.time()
-
-
-
-                time.sleep(5)
 
 
 
@@ -486,18 +791,67 @@ class NoVisageLock:
 
 
 
-    # -------------------------------------------------
+    # =====================================================
+    # FERMETURE PROPRE
+    # =====================================================
 
     def close(self):
 
 
-        self.running=False
+        logging.info(
+            "Arrêt NoVisageLock"
+        )
 
 
-        self.cap.release()
+        self.running = False
 
 
-        cv2.destroyAllWindows()
+
+        try:
+
+
+            self.camera.close()
+
+
+
+        except Exception:
+
+
+            logging.exception(
+                "Erreur fermeture caméra"
+            )
+
+
+
+        try:
+
+
+            self.events.stop()
+
+
+
+        except Exception:
+
+
+            logging.exception(
+                "Erreur arrêt événements Windows"
+            )
+
+
+
+        try:
+
+
+            cv2.destroyAllWindows()
+
+
+
+        except Exception:
+
+
+            pass
+
+
 
 
 
@@ -505,30 +859,44 @@ class NoVisageLock:
 # MAIN
 # =====================================================
 
-if __name__ == "__main__":
+def main():
 
 
-    lock = FileLock(
-        LOCK_FILE
-    )
+
+    if already_running():
+
+
+        logging.warning(
+
+            "Instance NoVisageLock déjà active"
+
+        )
+
+
+        return
+
+
+
+    app = None
+
 
 
     try:
 
 
-        with lock:
+        app = NoVisageLock()
 
 
-            app = NoVisageLock()
-
-            app.run()
+        app.run()
 
 
 
-    except Timeout:
+    except KeyboardInterrupt:
 
 
-        pass
+        logging.info(
+            "Arrêt manuel"
+        )
 
 
 
@@ -538,3 +906,22 @@ if __name__ == "__main__":
         logging.exception(
             e
         )
+
+
+
+    finally:
+
+
+        if app:
+
+
+            app.close()
+
+
+
+
+
+if __name__ == "__main__":
+
+
+    main()
